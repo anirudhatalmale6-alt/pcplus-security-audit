@@ -888,6 +888,174 @@ function Get-HardwareDiagnostics {
         }
     } @{ Status = "Unknown"; Description = "N/A"; PartialKey = "N/A" }
 
+    # Windows Product Key (from BIOS OEM key + registry backup key)
+    $results.WindowsProductKey = Invoke-SafeCheck {
+        $keys = @()
+        # OA3 key embedded in BIOS/UEFI firmware (most modern PCs)
+        $oa3Key = (Get-CimInstance -Query "SELECT OA3xOriginalProductKey FROM SoftwareLicensingService" -ErrorAction Stop).OA3xOriginalProductKey
+        if ($oa3Key) { $keys += @{ Source = "BIOS/UEFI (OA3)"; Key = $oa3Key } }
+        # Registry backup key (decoded from DigitalProductId)
+        try {
+            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+            $dpid = (Get-ItemProperty -Path $regPath -ErrorAction Stop).DigitalProductId
+            if ($dpid) {
+                $keyOffset = 52
+                $isWin8Plus = [math]::Floor($dpid[$keyOffset + 14] / 6) -band 1
+                $dpid[$keyOffset + 14] = ($dpid[$keyOffset + 14] -band 0xF7) -bor (($isWin8Plus -band 2) * 4)
+                $chars = "BCDFGHJKMPQRTVWXY2346789"
+                $decoded = ""
+                for ($i = 24; $i -ge 0; $i--) {
+                    $cur = 0
+                    for ($j = 14; $j -ge 0; $j--) {
+                        $cur = $cur * 256
+                        $cur = $dpid[$j + $keyOffset] + $cur
+                        $dpid[$j + $keyOffset] = [math]::Floor($cur / 24)
+                        $cur = $cur % 24
+                    }
+                    $decoded = $chars[$cur] + $decoded
+                    if (($i % 5 -eq 0) -and ($i -ne 0)) { $decoded = "-" + $decoded }
+                }
+                if ($isWin8Plus) {
+                    $last = $decoded[$decoded.Length - 1]
+                    $keypart1 = $decoded.Substring(1, $decoded.IndexOf($last) - 1)
+                    $insert = "N"
+                    $decoded = $decoded.Replace($keypart1, $keypart1 + $insert)
+                    if ($decoded.Length -gt 5 -and $decoded[0] -eq $decoded[$decoded.Length - 1]) {
+                        $decoded = $decoded.Substring(1)
+                    }
+                }
+                if ($decoded -and $decoded.Length -ge 25) {
+                    $keys += @{ Source = "Registry (DigitalProductId)"; Key = $decoded }
+                }
+            }
+        } catch {}
+        # ProductId (not the key but useful reference)
+        $productId = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue).ProductId
+        if ($productId) { $keys += @{ Source = "Product ID"; Key = $productId } }
+        $keys
+    } @()
+
+    # Office Product Keys
+    $results.OfficeKeys = Invoke-SafeCheck {
+        $officeKeys = @()
+        $officePaths = @(
+            "HKLM:\SOFTWARE\Microsoft\Office"
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office"
+        )
+        $versions = @("16.0", "15.0", "14.0")
+        foreach ($basePath in $officePaths) {
+            foreach ($ver in $versions) {
+                $regPath = "$basePath\$ver\Registration"
+                if (Test-Path $regPath) {
+                    Get-ChildItem $regPath -ErrorAction SilentlyContinue | ForEach-Object {
+                        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                        if ($props.ProductName -and $props.DigitalProductID) {
+                            $dpid = $props.DigitalProductID
+                            $keyOffset = 52
+                            $chars = "BCDFGHJKMPQRTVWXY2346789"
+                            $decoded = ""
+                            try {
+                                for ($i = 24; $i -ge 0; $i--) {
+                                    $cur = 0
+                                    for ($j = 14; $j -ge 0; $j--) {
+                                        $cur = $cur * 256
+                                        $cur = $dpid[$j + $keyOffset] + $cur
+                                        $dpid[$j + $keyOffset] = [math]::Floor($cur / 24)
+                                        $cur = $cur % 24
+                                    }
+                                    $decoded = $chars[$cur] + $decoded
+                                    if (($i % 5 -eq 0) -and ($i -ne 0)) { $decoded = "-" + $decoded }
+                                }
+                            } catch { $decoded = "" }
+                            if ($decoded -and $decoded.Length -ge 25) {
+                                $officeKeys += @{ Product = $props.ProductName; Key = $decoded; Version = $ver }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        # Also try ospp.vbs for Office 365/2019+
+        $osppPaths = @(
+            "$env:ProgramFiles\Microsoft Office\Office16\ospp.vbs"
+            "${env:ProgramFiles(x86)}\Microsoft Office\Office16\ospp.vbs"
+        )
+        foreach ($ospp in $osppPaths) {
+            if (Test-Path $ospp) {
+                try {
+                    $osppOutput = cscript //nologo $ospp /dstatus 2>&1
+                    $productName = ""; $lastChars = ""
+                    foreach ($line in $osppOutput) {
+                        if ($line -match "LICENSE NAME:\s*(.+)") { $productName = $Matches[1].Trim() }
+                        if ($line -match "Last 5 characters of installed product key:\s*(\S+)") { $lastChars = $Matches[1].Trim() }
+                    }
+                    if ($productName -and $lastChars) {
+                        $officeKeys += @{ Product = $productName; Key = "XXXXX-XXXXX-XXXXX-XXXXX-$lastChars"; Version = "365/2019+" }
+                    }
+                } catch {}
+                break
+            }
+        }
+        $officeKeys
+    } @()
+
+    # WiFi Passwords (all saved networks)
+    $results.WiFiPasswords = Invoke-SafeCheck {
+        $wifiList = @()
+        $profiles = netsh wlan show profiles 2>&1
+        $profileNames = @()
+        foreach ($line in $profiles) {
+            if ($line -match "All User Profile\s*:\s*(.+)$") {
+                $profileNames += $Matches[1].Trim()
+            }
+        }
+        foreach ($name in $profileNames) {
+            $detail = netsh wlan show profile name="$name" key=clear 2>&1
+            $password = ""; $auth = ""; $cipher = ""
+            foreach ($line in $detail) {
+                if ($line -match "Key Content\s*:\s*(.+)$") { $password = $Matches[1].Trim() }
+                if ($line -match "Authentication\s*:\s*(.+)$") { $auth = $Matches[1].Trim() }
+                if ($line -match "Cipher\s*:\s*(.+)$") { $cipher = $Matches[1].Trim() }
+            }
+            $wifiList += @{
+                SSID     = $name
+                Password = if ($password) { $password } else { "(Open/No password)" }
+                Auth     = $auth
+                Cipher   = $cipher
+            }
+        }
+        $wifiList
+    } @()
+
+    # Other Software License Keys (common apps from registry)
+    $results.SoftwareKeys = Invoke-SafeCheck {
+        $swKeys = @()
+        # Adobe products
+        $adobePaths = @(
+            "HKLM:\SOFTWARE\Adobe\Adobe Acrobat\DC\Registration"
+            "HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\DC\Registration"
+        )
+        foreach ($p in $adobePaths) {
+            if (Test-Path $p) {
+                $serial = (Get-ItemProperty $p -ErrorAction SilentlyContinue).SERIAL
+                if ($serial) { $swKeys += @{ Product = "Adobe Acrobat DC"; Key = $serial } }
+            }
+        }
+        # VLC, WinRAR, etc. from Uninstall registry
+        $uninstPaths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
+        foreach ($up in $uninstPaths) {
+            Get-ItemProperty $up -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.DisplayName -and $_.ProductKey) {
+                    $swKeys += @{ Product = $_.DisplayName; Key = $_.ProductKey }
+                }
+            }
+        }
+        $swKeys
+    } @()
+
     return $results
 }
 
@@ -1701,6 +1869,59 @@ $(if($Hardware.DeviceErrors.Count -gt 0) {
     <tr><th style="width:35%;">Property</th><th>Value</th></tr>
     <tr><td>License Status</td><td>$(if($Hardware.WindowsLicense.Status -eq 'Licensed'){"<span class='pass'>$iconPass Licensed</span>"}else{"<span class='fail'>$iconFail $($Hardware.WindowsLicense.Status)</span>"})</td></tr>
     <tr><td>Product Key (Partial)</td><td>$($Hardware.WindowsLicense.PartialKey)</td></tr>
+</table>
+
+<div class="page-break"></div>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<!-- LICENSE KEYS & CREDENTIALS RECOVERY -->
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<div class="section-header">License Keys &amp; Credentials Recovery</div>
+<p style="color:#888;font-size:8.5pt;margin-bottom:12px;">CONFIDENTIAL - This section contains product keys and passwords recovered from this system. Store securely.</p>
+
+<div class="sub-header">Windows Product Key</div>
+<table>
+    <tr><th>Source</th><th>Key</th></tr>
+    $(if($Hardware.WindowsProductKey.Count -gt 0) {
+        ($Hardware.WindowsProductKey | ForEach-Object { "<tr><td>$($_.Source)</td><td><strong style='font-family:Consolas,monospace;letter-spacing:1px;'>$($_.Key)</strong></td></tr>" }) -join "`n    "
+    } else {
+        "<tr><td colspan='2' class='warn'>$iconWarn No Windows product key found in BIOS or registry</td></tr>"
+    })
+</table>
+
+$(if($Hardware.OfficeKeys.Count -gt 0) {
+@"
+<div class="sub-header">Microsoft Office Product Keys</div>
+<table>
+    <tr><th>Product</th><th>Version</th><th>Key</th></tr>
+    $(($Hardware.OfficeKeys | ForEach-Object { "<tr><td>$($_.Product)</td><td>$($_.Version)</td><td><strong style='font-family:Consolas,monospace;letter-spacing:1px;'>$($_.Key)</strong></td></tr>" }) -join "`n    ")
+</table>
+"@
+} else {
+@"
+<div class="sub-header">Microsoft Office Product Keys</div>
+<table><tr><td class='warn'>$iconWarn No Office product keys found (Office may use Microsoft 365 account activation)</td></tr></table>
+"@
+})
+
+$(if($Hardware.SoftwareKeys.Count -gt 0) {
+@"
+<div class="sub-header">Other Software License Keys</div>
+<table>
+    <tr><th>Product</th><th>Key</th></tr>
+    $(($Hardware.SoftwareKeys | ForEach-Object { "<tr><td>$($_.Product)</td><td><strong style='font-family:Consolas,monospace;'>$($_.Key)</strong></td></tr>" }) -join "`n    ")
+</table>
+"@
+})
+
+<div class="sub-header">Saved WiFi Networks &amp; Passwords</div>
+<table>
+    <tr><th>Network (SSID)</th><th>Password</th><th>Authentication</th><th>Cipher</th></tr>
+    $(if($Hardware.WiFiPasswords.Count -gt 0) {
+        ($Hardware.WiFiPasswords | ForEach-Object { "<tr><td><strong>$($_.SSID)</strong></td><td style='font-family:Consolas,monospace;'>$($_.Password)</td><td>$($_.Auth)</td><td>$($_.Cipher)</td></tr>" }) -join "`n    "
+    } else {
+        "<tr><td colspan='4'>No saved WiFi profiles found</td></tr>"
+    })
 </table>
 
 <div class="page-break"></div>
