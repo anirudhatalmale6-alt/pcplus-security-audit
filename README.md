@@ -1,61 +1,66 @@
-# PC Plus Computing - Portable Security Audit Tool
+# PC Plus Computing - USB Toolkit
 
-Standalone PowerShell script that performs a comprehensive security and system audit on Windows 10/11 PCs, generating a branded PDF report. Runs from a USB drive with no installation required.
+Two portable PowerShell tools for PC technicians. Run from USB, no installation required.
 
-## Features
+## 1. Hardware & Security Audit (PCPlus-SecurityAudit.ps1)
 
-- **15-Point Security Audit**: Windows Update, antivirus, firewall, BitLocker, password policy, admin accounts, network shares, startup programs, RDP status, SMBv1, PowerShell policy, DNS config, open ports, disk health, system info
-- **Scoring System**: 0-100 security score with letter grades (A+ through F)
-- **Branded PDF Reports**: Professional reports with PC Plus Computing branding
-- **Windows Forms UI**: Launch dialog for customer/contact/technician info, progress bar, completion summary
-- **Zero Installation**: Runs directly from USB or any folder
-- **Auto-Elevation**: Prompts for admin rights if needed
+Comprehensive hardware diagnostic + 15-point security audit with branded PDF report.
 
-## Requirements
+### Features
+- **15-Point Security Audit**: Antivirus, firewall, BitLocker, patches, password policy, admin accounts, Secure Boot, TPM, RDP, SMBv1, UAC, guest account, auto-login, AV definitions
+- **Full Hardware Diagnostics**: RAM slots/speed/manufacturer, GPU/VRAM, motherboard/BIOS, battery health/cycle count, disk SMART (power-on hours, wear, temperature, read errors), monitors, printers, audio devices, USB devices, Device Manager errors, Windows license status, temperatures
+- **0-100 Security Score** with letter grades (A through F)
+- **Professional Branded PDF** with PC Plus Computing branding, cover page, executive summary
+- **Windows Forms UI**: Customer name, contact name, technician name, output folder
+- **Date and time** on cover page and footer
 
-- Windows 10 or Windows 11
-- PowerShell 5.1+ (built into Windows 10/11)
-- Administrator privileges
-- Microsoft Edge or Google Chrome (for PDF generation; falls back to HTML if neither available)
-
-## Usage
-
-### From USB Drive
-1. Copy `PCPlus-SecurityAudit.ps1` to a USB drive
-2. Insert USB into target PC
-3. Right-click the script > **Run with PowerShell**
-4. Fill in customer name, contact name, and technician name
-5. Click **Run Audit**
-6. Reports are saved to a `PCPlus-Audits` folder next to the script
-
-### Quick Launch (PowerShell)
+### Usage
 ```powershell
+# Right-click > Run with PowerShell, or:
 Set-ExecutionPolicy Bypass -Scope Process -Force
 .\PCPlus-SecurityAudit.ps1
 ```
 
-## Output
+### Output
+Reports saved to `PCPlus-Audits/` folder:
+`CustomerName - HOSTNAME - Hardware Security Audit 2026-05-19.pdf`
 
-Reports are saved to `PCPlus-Audits/` in the same directory as the script:
-- `CustomerName_HOSTNAME_2026-05-19.pdf` (primary)
-- `CustomerName_HOSTNAME_2026-05-19.html` (fallback if no browser for PDF)
+---
 
-## Security Checks
+## 2. Windows Debloat & Lockdown (PCPlus-Debloat.ps1)
 
-| # | Check | What It Tests |
-|---|-------|--------------|
-| 1 | Windows Update | Pending updates and last install date |
-| 2 | Antivirus | Real-time protection status |
-| 3 | Firewall | All profile states (Domain/Private/Public) |
-| 4 | BitLocker | Drive encryption status |
-| 5 | Password Policy | Complexity, length, expiry settings |
-| 6 | Admin Accounts | Number of local admin accounts |
-| 7 | Network Shares | Non-default shares exposed |
-| 8 | Startup Programs | Excessive auto-start entries |
-| 9 | RDP Status | Remote Desktop enabled/disabled |
-| 10 | SMBv1 | Legacy protocol check |
-| 11 | PowerShell Policy | Execution policy setting |
-| 12 | DNS Configuration | DNS server analysis |
-| 13 | Open Ports | Listening network connections |
-| 14 | Disk Health | SMART status and space |
-| 15 | System Info | OS version, uptime, specs |
+Strips bloatware from Windows 10/11. Designed for office PCs that only need browsing and printing.
+
+### Options (checkboxes, pick what you need)
+- Remove bloatware apps (Cortana, Xbox, Solitaire, TikTok, Netflix, etc.)
+- Disable Windows telemetry & data collection
+- Disable Cortana, Widgets, Game Bar
+- Remove OneDrive
+- Clean Start Menu and taskbar
+- Disable web search in Start Menu
+- Prevent Windows from reinstalling removed apps
+- Disable Windows suggestions, tips, and ads
+- Disable unnecessary services (keeps Print Spooler)
+- Create daily Downloads folder cleanup task (deletes files older than 1 day)
+- Block non-admin software installs (UAC enforcement)
+- Disable Microsoft Store
+- Optimize power settings (high performance, no sleep)
+
+### Usage
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+.\PCPlus-Debloat.ps1
+```
+
+Creates a detailed log file next to the script.
+
+---
+
+## Requirements
+- Windows 10 or Windows 11
+- PowerShell 5.1+ (built into Windows)
+- Administrator privileges
+- Edge or Chrome for PDF generation (audit tool)
+
+## USB Setup
+Copy both .ps1 files to a USB drive. Insert into client PC, right-click the script you need, "Run with PowerShell".

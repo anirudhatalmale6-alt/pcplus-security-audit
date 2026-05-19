@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    PC Plus Computing - Portable Security Audit Tool
+    PC Plus Computing - Hardware & Security Audit Tool
 .DESCRIPTION
-    Standalone PowerShell script that performs a comprehensive security and system
-    audit on Windows 10/11 PCs, generating a branded PDF report. Runs from a USB
-    drive with no installation required.
+    Standalone PowerShell script that performs a comprehensive hardware diagnostic
+    and security audit on Windows 10/11 PCs, generating a branded PDF report.
+    Runs from a USB drive with no installation required.
 .NOTES
     Company:  PC Plus Computing
     Website:  pcpluscomputing.com
     Phone:    604-760-1662
-    Version:  1.0.0
+    Version:  2.0.0
     Requires: PowerShell 5.1+, Windows 10/11, Administrator privileges
 #>
 
@@ -33,7 +33,7 @@ if (-not (Test-IsAdmin)) {
     } catch {
         [System.Windows.Forms.MessageBox]::Show(
             "This tool requires Administrator privileges.`nPlease right-click and 'Run as Administrator'.",
-            "PC Plus Security Audit - Elevation Required",
+            "PC Plus Hardware & Security Audit - Elevation Required",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         )
@@ -69,7 +69,7 @@ if ([string]::IsNullOrEmpty($ScriptDir)) { $ScriptDir = Get-Location }
 # ─────────────────────────────────────────────────────────────────────────────
 function Show-LaunchDialog {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "PC Plus Computing - Security Audit"
+    $form.Text = "PC Plus Computing - Hardware & Security Audit"
     $form.Size = New-Object System.Drawing.Size(500, 380)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
@@ -148,7 +148,7 @@ function Show-LaunchDialog {
     $y += 22
 
     $txtOut = New-Object System.Windows.Forms.TextBox
-    $txtOut.Text = $ScriptDir
+    $txtOut.Text = Join-Path $ScriptDir "PCPlus-Audits"
     $txtOut.Location = New-Object System.Drawing.Point(30, $y)
     $txtOut.Size = New-Object System.Drawing.Size(350, 24)
     $form.Controls.Add($txtOut)
@@ -220,7 +220,7 @@ function New-ProgressWindow {
     $form.Controls.Add($header)
 
     $hl = New-Object System.Windows.Forms.Label
-    $hl.Text = "SECURITY AUDIT IN PROGRESS"
+    $hl.Text = "HARDWARE & SECURITY AUDIT IN PROGRESS"
     $hl.ForeColor = [System.Drawing.Color]::White
     $hl.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $hl.AutoSize = $false
@@ -680,6 +680,217 @@ function Get-PerformanceInfo {
     return $results
 }
 
+function Get-HardwareDiagnostics {
+    $results = @{}
+
+    # Detailed RAM info per slot
+    $results.RAMSticks = Invoke-SafeCheck {
+        $sticks = @()
+        Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
+            $sticks += @{
+                Bank         = $_.BankLabel
+                Slot         = $_.DeviceLocator
+                CapacityGB   = [math]::Round($_.Capacity / 1GB, 1)
+                Speed        = "$($_.ConfiguredClockSpeed) MHz"
+                Type         = switch ($_.SMBIOSMemoryType) { 26 { "DDR4" }; 34 { "DDR5" }; 24 { "DDR3" }; default { "Type $($_.SMBIOSMemoryType)" } }
+                Manufacturer = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { "Unknown" }
+                PartNumber   = if ($_.PartNumber) { $_.PartNumber.Trim() } else { "N/A" }
+            }
+        }
+        $sticks
+    } @()
+
+    # Total RAM slots (populated vs empty)
+    $results.RAMSlots = Invoke-SafeCheck {
+        $total = (Get-CimInstance Win32_PhysicalMemoryArray | Measure-Object -Property MemoryDevices -Sum).Sum
+        $used = (Get-CimInstance Win32_PhysicalMemory | Measure-Object).Count
+        @{ Total = $total; Used = $used; Empty = ($total - $used) }
+    } @{ Total = 0; Used = 0; Empty = 0 }
+
+    # GPU / Display Adapters
+    $results.GPUs = Invoke-SafeCheck {
+        $gpus = @()
+        Get-CimInstance Win32_VideoController | ForEach-Object {
+            $gpus += @{
+                Name       = $_.Name
+                DriverVer  = $_.DriverVersion
+                DriverDate = if ($_.DriverDate) { $_.DriverDate.ToString("yyyy-MM-dd") } else { "Unknown" }
+                VRAM_MB    = if ($_.AdapterRAM -gt 0) { [math]::Round($_.AdapterRAM / 1MB, 0) } else { 0 }
+                Resolution = "$($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)"
+                Status     = $_.Status
+            }
+        }
+        $gpus
+    } @()
+
+    # Battery (laptops)
+    $results.Battery = Invoke-SafeCheck {
+        $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+        if ($battery) {
+            $designCap = 0; $fullChargeCap = 0; $cycleCount = 0; $healthPct = 0
+            try {
+                $battReport = Get-CimInstance -Namespace "root\WMI" -ClassName BatteryFullChargedCapacity -ErrorAction Stop
+                $battDesign = Get-CimInstance -Namespace "root\WMI" -ClassName BatteryStaticData -ErrorAction Stop
+                $fullChargeCap = $battReport.FullChargedCapacity
+                $designCap = $battDesign.DesignedCapacity
+                if ($designCap -gt 0) { $healthPct = [math]::Round(($fullChargeCap / $designCap) * 100, 1) }
+                $cycleCount = (Get-CimInstance -Namespace "root\WMI" -ClassName BatteryCycleCount -ErrorAction Stop).CycleCount
+            } catch {}
+            @{
+                Present        = $true
+                Status         = $battery.Status
+                ChargePercent  = $battery.EstimatedChargeRemaining
+                DesignCapacity = $designCap
+                FullCharge     = $fullChargeCap
+                HealthPercent  = $healthPct
+                CycleCount     = $cycleCount
+                EstRuntime     = if ($battery.EstimatedRunTime -and $battery.EstimatedRunTime -lt 71582788) {
+                                    "$([math]::Floor($battery.EstimatedRunTime / 60))h $($battery.EstimatedRunTime % 60)m"
+                                 } else { "On AC Power" }
+            }
+        } else { @{ Present = $false } }
+    } @{ Present = $false }
+
+    # Motherboard + BIOS
+    $results.Motherboard = Invoke-SafeCheck {
+        $board = Get-CimInstance Win32_BaseBoard
+        $bios = Get-CimInstance Win32_BIOS
+        @{
+            Manufacturer = $board.Manufacturer
+            Product      = $board.Product
+            Serial       = $board.SerialNumber
+            BIOSVendor   = $bios.Manufacturer
+            BIOSVersion  = $bios.SMBIOSBIOSVersion
+            BIOSDate     = if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString("yyyy-MM-dd") } else { "Unknown" }
+        }
+    } @{}
+
+    # USB Devices
+    $results.USBDevices = Invoke-SafeCheck {
+        $devices = @()
+        Get-CimInstance Win32_USBControllerDevice -ErrorAction SilentlyContinue | ForEach-Object {
+            $dep = [wmi]$_.Dependent
+            if ($dep.Description -and $dep.Description -notmatch "Root Hub|Host Controller|Composite|USB Input") {
+                $devices += @{ Name = $dep.Description; DeviceID = $dep.DeviceID; Status = $dep.Status }
+            }
+        }
+        $devices | Select-Object -First 20
+    } @()
+
+    # Monitors
+    $results.Monitors = Invoke-SafeCheck {
+        $monitors = @()
+        Get-CimInstance WmiMonitorID -Namespace root\wmi -ErrorAction Stop | ForEach-Object {
+            $mfr = -join ($_.ManufacturerName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ })
+            $name = -join ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ })
+            $serial = -join ($_.SerialNumberID | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ })
+            $monitors += @{
+                Manufacturer = $mfr
+                Model        = $name
+                Serial       = $serial
+                YearMade     = $_.YearOfManufacture
+                WeekMade     = $_.WeekOfManufacture
+            }
+        }
+        $monitors
+    } @()
+
+    # Audio devices
+    $results.AudioDevices = Invoke-SafeCheck {
+        $audio = @()
+        Get-CimInstance Win32_SoundDevice | ForEach-Object {
+            $audio += @{ Name = $_.Name; Status = $_.Status; Manufacturer = $_.Manufacturer }
+        }
+        $audio
+    } @()
+
+    # Printer info
+    $results.Printers = Invoke-SafeCheck {
+        $printers = @()
+        Get-CimInstance Win32_Printer | ForEach-Object {
+            $printers += @{
+                Name    = $_.Name
+                Default = $_.Default
+                Status  = switch ($_.PrinterStatus) { 1 { "Other" }; 2 { "Unknown" }; 3 { "Idle" }; 4 { "Printing" }; 5 { "Warmup" }; default { "Status $($_.PrinterStatus)" } }
+                Port    = $_.PortName
+                Driver  = $_.DriverName
+            }
+        }
+        $printers
+    } @()
+
+    # Temperature (best-effort, many desktops don't expose this)
+    $results.Temperatures = Invoke-SafeCheck {
+        $temps = @()
+        Get-CimInstance MSAcpi_ThermalZoneTemperature -Namespace root/wmi -ErrorAction Stop | ForEach-Object {
+            $celsius = [math]::Round(($_.CurrentTemperature / 10) - 273.15, 1)
+            $temps += @{ Zone = $_.InstanceName; TempC = $celsius; TempF = [math]::Round(($celsius * 9/5) + 32, 1) }
+        }
+        $temps
+    } @()
+
+    # Disk SMART details
+    $results.DiskSMART = Invoke-SafeCheck {
+        $smartData = @()
+        Get-PhysicalDisk | ForEach-Object {
+            $reliability = Get-StorageReliabilityCounter -PhysicalDisk $_ -ErrorAction SilentlyContinue
+            $smartData += @{
+                Model           = $_.FriendlyName
+                MediaType       = "$($_.MediaType)"
+                BusType         = "$($_.BusType)"
+                FirmwareVersion = $_.FirmwareVersion
+                Health          = "$($_.HealthStatus)"
+                OpStatus        = "$($_.OperationalStatus)"
+                SizeGB          = [math]::Round($_.Size / 1GB, 0)
+                PowerOnHours    = if ($reliability) { $reliability.PowerOnHours } else { "N/A" }
+                Temperature     = if ($reliability -and $reliability.Temperature) { "$($reliability.Temperature)C" } else { "N/A" }
+                ReadErrors      = if ($reliability) { $reliability.ReadErrorsTotal } else { "N/A" }
+                WriteErrors     = if ($reliability) { $reliability.WriteErrorsTotal } else { "N/A" }
+                Wear            = if ($reliability -and $reliability.Wear) { "$($reliability.Wear)%" } else { "N/A" }
+            }
+        }
+        $smartData
+    } @()
+
+    # Device Manager errors
+    $results.DeviceErrors = Invoke-SafeCheck {
+        $errors = @()
+        Get-CimInstance Win32_PnPEntity | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object {
+            $errorDesc = switch ($_.ConfigManagerErrorCode) {
+                1  { "Not configured" }
+                3  { "Driver corrupted" }
+                10 { "Cannot start" }
+                12 { "Not enough resources" }
+                14 { "Restart required" }
+                22 { "Disabled" }
+                28 { "Driver not installed" }
+                31 { "Not working properly" }
+                default { "Error code $($_.ConfigManagerErrorCode)" }
+            }
+            $errors += @{
+                Device    = $_.Name
+                ErrorCode = $_.ConfigManagerErrorCode
+                Error     = $errorDesc
+                Class     = $_.PNPClass
+            }
+        }
+        $errors
+    } @()
+
+    # Windows license status
+    $results.WindowsLicense = Invoke-SafeCheck {
+        $lic = Get-CimInstance SoftwareLicensingProduct | Where-Object { $_.Name -like "*Windows*" -and $_.LicenseStatus -ne 0 } | Select-Object -First 1
+        if ($lic) {
+            $statusText = switch ($lic.LicenseStatus) { 0 { "Unlicensed" }; 1 { "Licensed" }; 2 { "OOBGrace" }; 3 { "OOTGrace" }; 4 { "NonGenuineGrace" }; 5 { "Notification" }; 6 { "ExtendedGrace" }; default { "Unknown" } }
+            @{ Status = $statusText; Description = $lic.Description; PartialKey = $lic.PartialProductKey }
+        } else {
+            @{ Status = "Unknown"; Description = "N/A"; PartialKey = "N/A" }
+        }
+    } @{ Status = "Unknown"; Description = "N/A"; PartialKey = "N/A" }
+
+    return $results
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SCORING ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -839,6 +1050,7 @@ function Build-HTMLReport {
         $Software,
         $MissingPatches,
         $Performance,
+        $Hardware,
         $Scoring,
         $Recommendations
     )
@@ -1068,7 +1280,7 @@ function Build-HTMLReport {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Security Audit Report - $($Params.CustomerName)</title>
+<title>Hardware &amp; Security Audit Report - $($Params.CustomerName)</title>
 <style>
     @page {
         size: letter;
@@ -1242,8 +1454,8 @@ function Build-HTMLReport {
 <!-- ════════════════════════════════════════════════════════════════════ -->
 <div class="cover">
     <div class="cover-logo">PC PLUS COMPUTING</div>
-    <div class="cover-title">SECURITY AUDIT REPORT</div>
-    <div class="cover-subtitle">Comprehensive System &amp; Security Assessment</div>
+    <div class="cover-title">HARDWARE &amp; SECURITY AUDIT</div>
+    <div class="cover-subtitle">Comprehensive Hardware Diagnostic &amp; Security Assessment</div>
 
     <div class="score-circle">
         $scoreSVG
@@ -1359,6 +1571,136 @@ $(if ($Recommendations.Count -gt 0) {
 <table>
     <tr><th>Model</th><th>Type</th><th>Size</th><th>Health</th></tr>
     $diskHealthRows
+</table>
+
+<div class="page-break"></div>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<!-- HARDWARE DIAGNOSTICS -->
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<div class="section-header">Hardware Diagnostics</div>
+
+<div class="sub-header">Motherboard &amp; BIOS</div>
+<table>
+    <tr><th style="width:35%;">Property</th><th>Value</th></tr>
+    <tr><td>Motherboard</td><td>$(if($Hardware.Motherboard.Manufacturer){"$($Hardware.Motherboard.Manufacturer) $($Hardware.Motherboard.Product)"}else{"Unknown"})</td></tr>
+    <tr><td>Board Serial</td><td>$(if($Hardware.Motherboard.Serial){$Hardware.Motherboard.Serial}else{"N/A"})</td></tr>
+    <tr><td>BIOS Vendor</td><td>$(if($Hardware.Motherboard.BIOSVendor){$Hardware.Motherboard.BIOSVendor}else{"Unknown"})</td></tr>
+    <tr><td>BIOS Version</td><td>$(if($Hardware.Motherboard.BIOSVersion){$Hardware.Motherboard.BIOSVersion}else{"Unknown"})</td></tr>
+    <tr><td>BIOS Date</td><td>$(if($Hardware.Motherboard.BIOSDate){$Hardware.Motherboard.BIOSDate}else{"Unknown"})</td></tr>
+</table>
+
+<div class="sub-header">Memory (RAM) - $($Hardware.RAMSlots.Used) of $($Hardware.RAMSlots.Total) slots used$(if($Hardware.RAMSlots.Empty -gt 0){" ($($Hardware.RAMSlots.Empty) empty)"})</div>
+<table>
+    <tr><th>Slot</th><th>Capacity</th><th>Speed</th><th>Type</th><th>Manufacturer</th><th>Part Number</th></tr>
+    $(($Hardware.RAMSticks | ForEach-Object { "<tr><td>$($_.Slot)</td><td>$($_.CapacityGB) GB</td><td>$($_.Speed)</td><td>$($_.Type)</td><td>$($_.Manufacturer)</td><td>$($_.PartNumber)</td></tr>" }) -join "`n    ")
+</table>
+
+<div class="sub-header">Graphics / Display Adapters</div>
+<table>
+    <tr><th>GPU</th><th>VRAM</th><th>Driver Version</th><th>Driver Date</th><th>Resolution</th><th>Status</th></tr>
+    $(($Hardware.GPUs | ForEach-Object { "<tr><td>$($_.Name)</td><td>$(if($_.VRAM_MB -gt 0){"$($_.VRAM_MB) MB"}else{"Shared"})</td><td>$($_.DriverVer)</td><td>$($_.DriverDate)</td><td>$($_.Resolution)</td><td>$($_.Status)</td></tr>" }) -join "`n    ")
+</table>
+
+$(if($Hardware.Monitors.Count -gt 0) {
+@"
+<div class="sub-header">Connected Monitors</div>
+<table>
+    <tr><th>Model</th><th>Manufacturer</th><th>Serial</th><th>Year Made</th></tr>
+    $(($Hardware.Monitors | ForEach-Object { "<tr><td>$($_.Model)</td><td>$($_.Manufacturer)</td><td>$($_.Serial)</td><td>$(if($_.YearMade){$_.YearMade}else{'N/A'})</td></tr>" }) -join "`n    ")
+</table>
+"@
+})
+
+<div class="sub-header">Storage - Detailed SMART Diagnostics</div>
+<table>
+    <tr><th>Model</th><th>Type</th><th>Bus</th><th>Size</th><th>Health</th><th>Power-On Hours</th><th>Temp</th><th>Read Errors</th><th>Wear</th></tr>
+    $(($Hardware.DiskSMART | ForEach-Object {
+        $dhClass = if($_.Health -eq "Healthy"){"pass"}else{"fail"}
+        "<tr><td>$($_.Model)</td><td>$($_.MediaType)</td><td>$($_.BusType)</td><td>$($_.SizeGB) GB</td><td class='$dhClass'>$($_.Health)</td><td>$($_.PowerOnHours)</td><td>$($_.Temperature)</td><td>$($_.ReadErrors)</td><td>$($_.Wear)</td></tr>"
+    }) -join "`n    ")
+</table>
+
+$(if($Hardware.Battery.Present) {
+    $battHealthClass = if($Hardware.Battery.HealthPercent -ge 80){"pass"}elseif($Hardware.Battery.HealthPercent -ge 50){"warn"}else{"fail"}
+@"
+<div class="sub-header">Battery Health</div>
+<table>
+    <tr><th style="width:35%;">Property</th><th>Value</th></tr>
+    <tr><td>Status</td><td>$($Hardware.Battery.Status)</td></tr>
+    <tr><td>Current Charge</td><td>$($Hardware.Battery.ChargePercent)%</td></tr>
+    <tr><td>Battery Health</td><td class='$battHealthClass'>$($Hardware.Battery.HealthPercent)%</td></tr>
+    <tr><td>Design Capacity</td><td>$($Hardware.Battery.DesignCapacity) mWh</td></tr>
+    <tr><td>Full Charge Capacity</td><td>$($Hardware.Battery.FullCharge) mWh</td></tr>
+    <tr><td>Cycle Count</td><td>$($Hardware.Battery.CycleCount)</td></tr>
+    <tr><td>Estimated Runtime</td><td>$($Hardware.Battery.EstRuntime)</td></tr>
+</table>
+"@
+})
+
+$(if($Hardware.Temperatures.Count -gt 0) {
+@"
+<div class="sub-header">Temperature Readings</div>
+<table>
+    <tr><th>Sensor Zone</th><th>Temperature (C)</th><th>Temperature (F)</th></tr>
+    $(($Hardware.Temperatures | ForEach-Object {
+        $tempClass = if($_.TempC -gt 80){"fail"}elseif($_.TempC -gt 60){"warn"}else{"pass"}
+        "<tr><td>$($_.Zone)</td><td class='$tempClass'>$($_.TempC) C</td><td class='$tempClass'>$($_.TempF) F</td></tr>"
+    }) -join "`n    ")
+</table>
+"@
+})
+
+$(if($Hardware.Printers.Count -gt 0) {
+@"
+<div class="sub-header">Printers</div>
+<table>
+    <tr><th>Name</th><th>Status</th><th>Port</th><th>Default</th></tr>
+    $(($Hardware.Printers | ForEach-Object { "<tr><td>$($_.Name)</td><td>$($_.Status)</td><td>$($_.Port)</td><td>$(if($_.Default){'Yes'}else{'No'})</td></tr>" }) -join "`n    ")
+</table>
+"@
+})
+
+$(if($Hardware.AudioDevices.Count -gt 0) {
+@"
+<div class="sub-header">Audio Devices</div>
+<table>
+    <tr><th>Device</th><th>Manufacturer</th><th>Status</th></tr>
+    $(($Hardware.AudioDevices | ForEach-Object { "<tr><td>$($_.Name)</td><td>$($_.Manufacturer)</td><td>$($_.Status)</td></tr>" }) -join "`n    ")
+</table>
+"@
+})
+
+$(if($Hardware.USBDevices.Count -gt 0) {
+@"
+<div class="sub-header">USB Devices</div>
+<table>
+    <tr><th>Device</th><th>Status</th></tr>
+    $(($Hardware.USBDevices | ForEach-Object { "<tr><td>$($_.Name)</td><td>$($_.Status)</td></tr>" }) -join "`n    ")
+</table>
+"@
+})
+
+$(if($Hardware.DeviceErrors.Count -gt 0) {
+@"
+<div class="sub-header" style="color:$COLOR_RED;">Device Manager Errors ($($Hardware.DeviceErrors.Count) issues found)</div>
+<table>
+    <tr><th>Device</th><th>Class</th><th>Error</th></tr>
+    $(($Hardware.DeviceErrors | ForEach-Object { "<tr><td class='fail'>$($_.Device)</td><td>$($_.Class)</td><td class='fail'>$($_.Error)</td></tr>" }) -join "`n    ")
+</table>
+"@
+} else {
+@"
+<div class="sub-header" style="color:$COLOR_GREEN;">Device Manager - No Errors</div>
+<p class="pass-bg"><span class="pass">$iconPass</span> All devices functioning properly. No driver errors or hardware issues detected.</p>
+"@
+})
+
+<div class="sub-header">Windows License</div>
+<table>
+    <tr><th style="width:35%;">Property</th><th>Value</th></tr>
+    <tr><td>License Status</td><td>$(if($Hardware.WindowsLicense.Status -eq 'Licensed'){"<span class='pass'>$iconPass Licensed</span>"}else{"<span class='fail'>$iconFail $($Hardware.WindowsLicense.Status)</span>"})</td></tr>
+    <tr><td>Product Key (Partial)</td><td>$($Hardware.WindowsLicense.PartialKey)</td></tr>
 </table>
 
 <div class="page-break"></div>
@@ -1522,8 +1864,12 @@ Update-Progress $progressForm "Checking for missing Windows updates (this may ta
 $missingPatches = Get-MissingPatches
 
 # ── PERFORMANCE ──
-Update-Progress $progressForm "Measuring system performance..." 78
+Update-Progress $progressForm "Measuring system performance..." 70
 $performance = Get-PerformanceInfo
+
+# ── HARDWARE DIAGNOSTICS ──
+Update-Progress $progressForm "Running hardware diagnostics..." 78
+$hardware = Get-HardwareDiagnostics
 
 # ── SCORING ──
 Update-Progress $progressForm "Calculating security score..." 85
@@ -1536,12 +1882,12 @@ Update-Progress $progressForm "Generating report..." 90
 $safeCustName = $params.CustomerName -replace '[\\/:*?"<>|]', '_'
 $safeCompName = $systemInfo.ComputerName -replace '[\\/:*?"<>|]', '_'
 $dateStr = Get-Date -Format "yyyy-MM-dd"
-$baseFileName = "$safeCustName - $safeCompName - Security Audit $dateStr"
+$baseFileName = "$safeCustName - $safeCompName - Hardware Security Audit $dateStr"
 
 $htmlPath = Join-Path $params.OutputFolder "$baseFileName.html"
 $pdfPath  = Join-Path $params.OutputFolder "$baseFileName.pdf"
 
-$htmlContent = Build-HTMLReport $params $systemInfo $security $network $software $missingPatches $performance $scoring $recommendations
+$htmlContent = Build-HTMLReport $params $systemInfo $security $network $software $missingPatches $performance $hardware $scoring $recommendations
 [System.IO.File]::WriteAllText($htmlPath, $htmlContent, [System.Text.Encoding]::UTF8)
 
 # ── CONVERT TO PDF ──
@@ -1557,7 +1903,7 @@ $progressForm.Close()
 $progressForm.Dispose()
 
 # ── COMPLETION DIALOG ──
-$resultMsg = "Security Audit Complete!`n`n"
+$resultMsg = "Hardware & Security Audit Complete!`n`n"
 $resultMsg += "Score: $($scoring.Score)/100 (Grade $($scoring.Grade))`n"
 $resultMsg += "Checks Passed: $(($scoring.Breakdown | Where-Object { $_.Passed }).Count) / $($scoring.Breakdown.Count)`n"
 $resultMsg += "Duration: $([math]::Round($duration, 1)) seconds`n`n"
@@ -1570,7 +1916,7 @@ if ($pdfSuccess) {
 $resultMsg += "HTML Report: $htmlPath"
 
 $completionForm = New-Object System.Windows.Forms.Form
-$completionForm.Text = "PC Plus Computing - Audit Complete"
+$completionForm.Text = "PC Plus Computing - Hardware & Security Audit Complete"
 $completionForm.Size = New-Object System.Drawing.Size(520, 320)
 $completionForm.StartPosition = "CenterScreen"
 $completionForm.FormBorderStyle = "FixedDialog"
